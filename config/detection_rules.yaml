@@ -1,0 +1,40 @@
+# Seuils des règles de détection (modifiables sans toucher au code)
+# Utilisé par l'application Spark Streaming (phase 2).
+
+window:
+  duration: "10 seconds"     # taille de la fenêtre glissante
+  slide: "5 seconds"         # pas de glissement
+  watermark: "30 seconds"    # retard toléré pour les flux en retard
+
+rules:
+  ddos_dos:
+    enabled: true
+    # paquets par seconde vers une même destination (port) dans la fenêtre
+    max_packets_per_second: 5000
+    # nombre de connexions vers une même destination dans la fenêtre
+    max_connections_per_window: 2000
+    severity: critical
+
+  port_scan:
+    enabled: true
+    # nombre de ports distincts visés dans la fenêtre
+    max_distinct_ports: 100
+    severity: high
+
+  brute_force:
+    enabled: true
+    target_ports: [21, 22]   # FTP, SSH
+    # une connexion est "courte" si sa durée est inférieure à ce seuil (microsecondes)
+    short_flow_duration_us: 1000000
+    max_short_connections_per_window: 50
+    severity: high
+
+kafka:
+  bootstrap_servers: "kafka:29092"
+  topic: "network-flows"
+
+elasticsearch:
+  host: "elasticsearch"
+  port: 9200
+  flows_index: "ids-flows"
+  alerts_index: "ids-alerts"

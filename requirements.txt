@@ -1,0 +1,5 @@
+# Pour le producteur Kafka (exécuté sur ta machine)
+pandas>=2.0
+pyarrow>=14.0
+kafka-python>=2.0.3
+pyyaml>=6.0

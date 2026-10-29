@@ -1,0 +1,96 @@
+# Plateforme Big Data de détection d'intrusions réseau en temps réel
+# Lancer tout :            docker compose up -d
+# Lancer seulement Spark :  docker compose up -d spark-master spark-worker
+
+services:
+
+  # ---------- Ingestion : Kafka (mode KRaft, sans Zookeeper) ----------
+  kafka:
+    image: apache/kafka:3.8.0
+    container_name: kafka
+    ports:
+      - "9092:9092"          # accès depuis ta machine (producteur Python)
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:29092,CONTROLLER://:9093,PLAINTEXT_HOST://:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 3
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+
+  # Interface web pour voir les topics et les messages : http://localhost:8090
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    ports:
+      - "8090:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: ids-local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+    depends_on:
+      - kafka
+
+  # ---------- Traitement : Spark (1 master + 1 worker) ----------
+  spark-master:
+    build: ./spark
+    image: ids-spark:3.5.3
+    container_name: spark-master
+    hostname: spark-master   # indispensable : les executors rappellent le driver par ce nom
+    user: root
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
+    ports:
+      - "8080:8080"          # interface web du master : http://localhost:8080
+      - "7077:7077"
+      - "4040:4040"          # interface web d'un job en cours
+    volumes:
+      - ./:/opt/project      # le projet est visible dans le conteneur
+
+  spark-worker:
+    image: ids-spark:3.5.3
+    container_name: spark-worker
+    hostname: spark-worker
+    user: root
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
+    environment:
+      SPARK_WORKER_CORES: 2
+      SPARK_WORKER_MEMORY: 2g
+    ports:
+      - "8081:8081"
+    volumes:
+      - ./:/opt/project
+    depends_on:
+      - spark-master
+
+  # ---------- Stockage des résultats et visualisation ----------
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.3
+    container_name: elasticsearch
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: -Xms1g -Xmx1g
+    ports:
+      - "9200:9200"
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.15.3
+    container_name: kibana
+    environment:
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+    ports:
+      - "5601:5601"          # tableau de bord : http://localhost:5601
+    depends_on:
+      - elasticsearch
+
+volumes:
+  es-data:
