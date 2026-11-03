@@ -1,6 +1,7 @@
-# Plateforme Big Data de détection d'intrusions réseau en temps réel
-# Lancer tout :            docker compose up -d
+# Analyse Big Data pour la détection en temps réel des cyberattaques
+# Lancer tout :             docker compose up -d
 # Lancer seulement Spark :  docker compose up -d spark-master spark-worker
+# Lancer les bases NoSQL :  docker compose up -d cassandra redis
 
 services:
 
@@ -25,6 +26,8 @@ services:
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       KAFKA_NUM_PARTITIONS: 3
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_RETENTION_HOURS: 24       # Spark peut relire 24 h de messages après une panne
+      KAFKA_HEAP_OPTS: -Xmx512m -Xms512m
 
   # Interface web pour voir les topics et les messages : http://localhost:8090
   kafka-ui:
@@ -69,14 +72,45 @@ services:
     depends_on:
       - spark-master
 
-  # ---------- Stockage des résultats et visualisation ----------
+  # ---------- Bases NoSQL (exigence du projet : au moins 2) ----------
+  # Cassandra : historique (métriques par fenêtre, alertes) — séries temporelles
+  cassandra:
+    image: cassandra:4.1
+    container_name: cassandra
+    hostname: cassandra
+    ports:
+      - "9042:9042"
+    environment:
+      MAX_HEAP_SIZE: 512M          # limité pour tenir sur un seul poste
+      HEAP_NEWSIZE: 128M
+      CASSANDRA_CLUSTER_NAME: ids-cluster
+    volumes:
+      - cassandra-data:/var/lib/cassandra
+      - ./config/cassandra:/schema:ro
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -e 'describe keyspaces' || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+
+  # Redis : état temps réel (dernières alertes, compteurs, seuils, anti-doublons)
+  redis:
+    image: redis:7.2
+    container_name: redis
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb"]
+    volumes:
+      - redis-data:/data
+
+  # ---------- Recherche et visualisation (ELK) ----------
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.15.3
     container_name: elasticsearch
     environment:
       discovery.type: single-node
       xpack.security.enabled: "false"
-      ES_JAVA_OPTS: -Xms1g -Xmx1g
+      ES_JAVA_OPTS: -Xms512m -Xmx512m
     ports:
       - "9200:9200"
     volumes:
@@ -94,3 +128,5 @@ services:
 
 volumes:
   es-data:
+  cassandra-data:
+  redis-data:

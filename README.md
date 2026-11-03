@@ -1,7 +1,15 @@
-# Plateforme Big Data de détection d'intrusions réseau en temps réel
+# Analyse Big Data pour la détection en temps réel des cyberattaques dans les réseaux informatiques
 
-Pipeline : **CSE-CIC-IDS2018 → Kafka → Spark Structured Streaming → Elasticsearch → Kibana**,
-avec un traitement batch Spark de l'historique (nettoyage, Parquet, statistiques).
+Pipeline : **CSE-CIC-IDS2018 → Kafka → Spark Structured Streaming → Cassandra + Redis + Elasticsearch → Kibana**,
+avec un traitement batch Spark de l'historique (nettoyage, Parquet, statistiques, calibrage des seuils).
+
+| Brique | Rôle |
+|---|---|
+| Kafka | Ingestion du trafic (`network-flows`) et diffusion des alertes (`ids-alerts`) |
+| Spark | Batch (historique) et Structured Streaming (détection sur fenêtres de 10 s) |
+| **Cassandra** (NoSQL colonnes) | Historique : métriques par fenêtre, alertes — `config/cassandra/schema.cql` |
+| **Redis** (NoSQL clé-valeur) | État temps réel : dernières alertes, compteurs, seuils actifs, anti-doublons |
+| Elasticsearch + Kibana | Recherche des alertes et tableau de bord en direct |
 
 ## Structure du projet
 
@@ -23,12 +31,14 @@ ids-bigdata/
 
 ## Avancement
 
-| Phase | Contenu | État |
+| Étape (projet final) | Contenu | État |
 |---|---|---|
-| 1 | Environnement Docker, nettoyage batch, Parquet, statistiques | ✅ en cours |
-| 1 bis | Producteur Kafka (rejeu chronologique, débit réglable) | ✅ code prêt |
-| 2 | Spark Structured Streaming + règles DDoS / scan / brute force | ⏳ |
-| 3 | Elasticsearch + tableau de bord Kibana + évaluation | ⏳ |
+| 1. Conception | Architecture, justification des choix, modélisation des données, points critiques | ✅ dossier de conception |
+| 2. Déploiement | Nettoyage batch + Parquet + statistiques | ✅ code prêt |
+| 2. Déploiement | Producteur Kafka (rejeu chronologique, débit réglable) | ✅ code prêt |
+| 2. Déploiement | Spark Structured Streaming + règles DDoS / scan / brute force | ⏳ |
+| 3. Intégration NoSQL | Cassandra + Redis (services et schéma prêts), écriture depuis Spark | ⏳ |
+| 4. Tests | Performance (débit, latence) et tolérance aux pannes (RTO) | ⏳ |
 
 ---
 
@@ -140,6 +150,27 @@ Ouvrir **http://localhost:8090** → *Topics* → `network-flows` → *Messages*
 📸 *Capture d'écran.*
 
 Le débit réel s'affiche toutes les 5 secondes (objectif du cahier des charges : ≥ 1 000 flux/s).
+
+## Étape 7 — Démarrer les bases NoSQL (Cassandra + Redis)
+
+```bash
+docker compose up -d cassandra redis
+docker compose ps            # attendre que cassandra soit "healthy" (1 à 2 min)
+```
+
+Créer le schéma Cassandra (keyspace `ids` et ses 4 tables) :
+```bash
+docker compose exec cassandra cqlsh -f /schema/schema.cql
+docker compose exec cassandra cqlsh -e "DESCRIBE TABLES" -k ids
+```
+
+Tester Redis :
+```bash
+docker compose exec redis redis-cli PING                 # réponse : PONG
+docker compose exec redis redis-cli HSET ids:thresholds brute_force 50
+docker compose exec redis redis-cli HGETALL ids:thresholds
+```
+📸 *Captures d'écran : les tables Cassandra et la réponse de Redis.*
 
 ---
 

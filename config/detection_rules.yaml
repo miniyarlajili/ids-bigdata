@@ -29,12 +29,28 @@ rules:
     max_short_connections_per_window: 50
     severity: high
 
+# Anti-doublons : une même alerte (type + port) n'est réémise qu'après ce délai
+dedup_seconds: 60
+
 kafka:
   bootstrap_servers: "kafka:29092"
-  topic: "network-flows"
+  flows_topic: "network-flows"
+  alerts_topic: "ids-alerts"
+
+cassandra:
+  host: "cassandra"
+  port: 9042
+  keyspace: "ids"
+
+redis:
+  host: "redis"
+  port: 6379
+  thresholds_key: "ids:thresholds"     # seuils calculés par le batch (prioritaires sur ce fichier)
+  latest_alerts_key: "ids:alerts:latest"
+  latest_alerts_max: 100
 
 elasticsearch:
   host: "elasticsearch"
   port: 9200
-  flows_index: "ids-flows"
+  traffic_index: "ids-traffic"
   alerts_index: "ids-alerts"
