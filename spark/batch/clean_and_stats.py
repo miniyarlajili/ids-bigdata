@@ -2,11 +2,17 @@
 Traitement batch de l'historique CSE-CIC-IDS2018 avec Spark.
 
 Étapes :
-  1. Charger tous les CSV de data/raw/
-  2. Nettoyer : lignes d'en-tête répétées, valeurs vides / infinies,
+  1. Charger tous les CSV de data/raw/ (fichiers à 80 ou 84 colonnes)
+  2. Nettoyer : lignes d'en-tête répétées, valeurs vides / NaN / infinies,
      doublons, colonnes constantes (inutiles)
   3. Enregistrer les données propres en Parquet (partitionné par jour)
   4. Produire les statistiques globales (CSV + graphiques PNG dans reports/)
+
+Optimisé pour le volume complet (~16 millions de flux) :
+  - les comptages du nettoyage et la recherche des colonnes constantes se font
+    en UNE seule passe d'agrégation ;
+  - les statistiques sont calculées sur le Parquet (colonnes compressées),
+    pas en relisant les CSV.
 
 Lancement (dans le conteneur Spark) :
   spark-submit --master spark://spark-master:7077 \
@@ -27,10 +33,11 @@ from pyspark.sql.window import Window
 # Colonnes textuelles (toutes les autres sont numériques)
 TEXT_COLS = {"timestamp", "label", "flow_id", "src_ip", "dst_ip"}
 INT_COLS = {"dst_port", "src_port", "protocol"}
+REQUIRED = ["timestamp", "label", "dst_port", "protocol"]
 
 
 def to_snake(name: str) -> str:
-    """'Flow Byts/s' -> 'flow_byts_s' (noms compatibles Parquet / Elasticsearch)."""
+    """'Flow Byts/s' -> 'flow_byts_s' (noms compatibles Parquet / Elasticsearch / Cassandra)."""
     name = re.sub(r"[^0-9a-zA-Z]+", "_", name.strip()).strip("_")
     return name.lower()
 
@@ -39,10 +46,11 @@ def load_csvs(spark: SparkSession, input_dir: str) -> DataFrame:
     files = sorted(glob.glob(os.path.join(input_dir, "*.csv")))
     if not files:
         raise SystemExit(f"Aucun fichier CSV trouvé dans {input_dir}")
-    print(f"[load] {len(files)} fichier(s) :")
+    total_mb = sum(os.path.getsize(f) for f in files) / 1e6
+    print(f"[load] {len(files)} fichier(s), {total_mb:,.0f} Mo :")
     df_all = None
     for f in files:
-        print(f"   - {os.path.basename(f)}")
+        print(f"   - {os.path.basename(f)}  ({os.path.getsize(f) / 1e6:,.0f} Mo)")
         df = spark.read.option("header", True).csv(f)  # tout en texte au départ
         df = df.toDF(*[to_snake(c) for c in df.columns])
         # Certains fichiers ont 84 colonnes (avec IP), d'autres 80 :
@@ -51,46 +59,45 @@ def load_csvs(spark: SparkSession, input_dir: str) -> DataFrame:
 
 
 def clean(df: DataFrame, report: dict) -> DataFrame:
-    report["rows_raw"] = df.count()
+    # Ligne d'en-tête répétée au milieu de certains fichiers
+    df = df.withColumn("_hdr", F.col("label") == "Label")
 
-    # 1) Lignes d'en-tête répétées au milieu de certains fichiers
-    df = df.filter(F.col("label") != "Label")
-    report["rows_after_header_removal"] = df.count()
-
-    # 2) Typage des colonnes
+    # Typage des colonnes
     for c in df.columns:
         if c in INT_COLS:
             df = df.withColumn(c, F.col(c).cast("int"))
-        elif c not in TEXT_COLS:
+        elif c not in TEXT_COLS and c != "_hdr":
             df = df.withColumn(c, F.col(c).cast("double"))
     df = df.withColumn("timestamp", F.to_timestamp("timestamp", "dd/MM/yyyy HH:mm:ss"))
 
-    # 3) Valeurs vides, NaN ou infinies ("Infinity" dans les CSV)
-    num_cols = [c for c in df.columns if c not in TEXT_COLS and c not in INT_COLS]
+    # Valeurs vides, NaN ou infinies ("Infinity" dans les CSV)
+    num_cols = [c for c in df.columns if c not in TEXT_COLS and c not in INT_COLS and c != "_hdr"]
     bad = F.lit(False)
     for c in num_cols:
         bad = bad | F.col(c).isNull() | F.isnan(c) | F.col(c).isin(float("inf"), float("-inf"))
-    for c in ["timestamp", "label", "dst_port", "protocol"]:
+    for c in REQUIRED:
         bad = bad | F.col(c).isNull()
-    df = df.filter(~bad)
-    report["rows_after_invalid_removal"] = df.count()
+    df = df.withColumn("_bad", bad)
+    valid = (~F.col("_hdr")) & (~F.col("_bad"))
 
-    # 4) Doublons
-    df = df.dropDuplicates()
-    report["rows_after_dedup"] = df.count()
-
-    # 5) Colonnes constantes (même valeur partout -> aucune information)
-    aggs = []
+    # UNE passe : comptages + min/max de chaque colonne (pour repérer les colonnes constantes)
+    aggs = [F.count(F.lit(1)).alias("raw"),
+            F.sum(F.col("_hdr").cast("int")).alias("hdr"),
+            F.sum(((~F.col("_hdr")) & F.col("_bad")).cast("int")).alias("invalid")]
     for c in num_cols:
-        aggs += [F.min(c).alias(f"{c}__min"), F.max(c).alias(f"{c}__max")]
-    mm = df.agg(*aggs).first().asDict()
-    constant = [c for c in num_cols if mm[f"{c}__min"] == mm[f"{c}__max"]]
-    df = df.drop(*constant)
-    report["dropped_constant_columns"] = constant
-    report["columns_final"] = len(df.columns)
+        aggs += [F.min(F.when(valid, F.col(c))).alias(f"{c}__min"),
+                 F.max(F.when(valid, F.col(c))).alias(f"{c}__max")]
+    r = df.agg(*aggs).first().asDict()
 
-    # 6) Colonnes utiles pour la suite
-    df = (df.withColumn("is_attack", (F.col("label") != "Benign").cast("int"))
+    report["rows_raw"] = r["raw"]
+    report["rows_after_header_removal"] = r["raw"] - (r["hdr"] or 0)
+    report["rows_after_invalid_removal"] = report["rows_after_header_removal"] - (r["invalid"] or 0)
+    constant = [c for c in num_cols if r[f"{c}__min"] == r[f"{c}__max"]]
+    report["dropped_constant_columns"] = constant
+
+    df = (df.filter(valid).drop("_hdr", "_bad", *constant)
+            .dropDuplicates()
+            .withColumn("is_attack", (F.col("label") != "Benign").cast("int"))
             .withColumn("date", F.to_date("timestamp")))
     return df
 
@@ -133,7 +140,7 @@ def save_stats(df: DataFrame, reports_dir: str) -> None:
         ax.set_xlabel("Nombre de flux")
         fig.tight_layout(); fig.savefig(f"{reports_dir}/repartition_labels.png", dpi=120); plt.close(fig)
 
-        fig, ax = plt.subplots(figsize=(9, 4))
+        fig, ax = plt.subplots(figsize=(10, 4))
         d = per_day.copy(); d["date"] = d["date"].astype(str)
         ax.bar(d["date"], d["flows"] - d["attacks"], label="Normal", color="#2a9d8f")
         ax.bar(d["date"], d["attacks"], bottom=d["flows"] - d["attacks"], label="Attaque", color="#e76f51")
@@ -161,20 +168,38 @@ def main():
 
     spark = (SparkSession.builder.appName("IDS-batch-clean-and-stats")
              .config("spark.sql.session.timeZone", "UTC")
+             # une date mal formée devient NULL (ligne écartée) au lieu de faire échouer le job
+             .config("spark.sql.legacy.timeParserPolicy", "CORRECTED")
              .getOrCreate())
     spark.sparkContext.setLogLevel("WARN")
     t0 = time.time()
 
     report = {}
-    df = clean(load_csvs(spark, args.input), report).cache()
+    df = clean(load_csvs(spark, args.input), report)
 
-    (df.repartition("date")
+    # ~8 fichiers par jour : évite un fichier géant (jour du 20/02) et des milliers de petits fichiers
+    (df.withColumn("_salt", (F.rand(seed=42) * 8).cast("int"))
+       .repartition("date", "_salt").drop("_salt")
        .write.mode("overwrite").partitionBy("date").parquet(args.output))
     print(f"[parquet] données propres écrites dans {args.output}")
+    t_write = time.time()
 
-    save_stats(df, args.reports)
+    # Les statistiques sont calculées sur le Parquet (beaucoup plus rapide que les CSV)
+    clean_df = spark.read.parquet(args.output)
+    report["rows_after_dedup"] = clean_df.count()
+    report["columns_final"] = len(clean_df.columns)
+    save_stats(clean_df, args.reports)
 
-    report["duration_seconds"] = round(time.time() - t0, 1)
+    def dir_mb(path):
+        return round(sum(os.path.getsize(os.path.join(dp, f))
+                         for dp, _, fs in os.walk(path) for f in fs) / 1e6, 1)
+    report["size_csv_mb"] = round(sum(os.path.getsize(f) for f in glob.glob(os.path.join(args.input, "*.csv"))) / 1e6, 1)
+    report["size_parquet_mb"] = dir_mb(args.output)
+    report["duration_seconds"] = {
+        "nettoyage_et_ecriture_parquet": round(t_write - t0, 1),
+        "statistiques": round(time.time() - t_write, 1),
+        "total": round(time.time() - t0, 1),
+    }
     with open(os.path.join(args.reports, "rapport_nettoyage.json"), "w") as f:
         json.dump(report, f, indent=2, ensure_ascii=False)
     print("\n=== Rapport de nettoyage ===")

@@ -88,6 +88,18 @@ mkdir data\raw -Force
 curl.exe -L -o data\raw\Wednesday-14-02-2018_TrafficForML_CICFlowMeter.csv "https://cse-cic-ids2018.s3.ca-central-1.amazonaws.com/Processed%20Traffic%20Data%20for%20ML%20Algorithms/Wednesday-14-02-2018_TrafficForML_CICFlowMeter.csv"
 ```
 
+### Jeu complet (10 jours, ~16 millions de flux, ~6,5 Go)
+
+Une fois le pipeline validé sur un jour, télécharger **tous** les fichiers. Le script lit la
+liste directement dans le bucket S3, vérifie l'espace disque (taille + 10 Go de marge) et
+reprend là où il s'est arrêté si on le relance :
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\download_all.ps1
+```
+Puis relancer l'étape 4 : Spark traite alors les 10 fichiers d'un coup (compter 15 à 40 min
+selon la machine). Le rapport `reports/rapport_nettoyage.json` donne les tailles CSV et Parquet
+et les durées de chaque phase.
+
 Si le téléchargement échoue : le même fichier existe sur Kaggle (dataset « IDS 2018 Intrusion CSVs
 (CSE-CIC-IDS2018) »). Le déposer dans `data/raw/`.
 
