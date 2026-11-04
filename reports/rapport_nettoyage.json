@@ -1,0 +1,27 @@
+{
+  "size_staging_mb": 2097.6,
+  "rows_raw": 16233002,
+  "rows_after_header_removal": 16232943,
+  "rows_after_invalid_removal": 16137183,
+  "dropped_constant_columns": [
+    "bwd_psh_flags",
+    "bwd_urg_flags",
+    "fwd_byts_b_avg",
+    "fwd_pkts_b_avg",
+    "fwd_blk_rate_avg",
+    "bwd_byts_b_avg",
+    "bwd_pkts_b_avg",
+    "bwd_blk_rate_avg"
+  ],
+  "rows_after_dedup": 15727888,
+  "columns_final": 78,
+  "size_csv_mb": 6886.6,
+  "size_parquet_mb": 2000.9,
+  "duration_seconds": {
+    "A_conversion": 171.2,
+    "B_bilan": 314.1,
+    "C_doublons": 477.9,
+    "D_statistiques": 22.1,
+    "total": 986.6
+  }
+}

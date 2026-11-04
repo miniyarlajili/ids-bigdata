@@ -1,0 +1,11 @@
+dst_port,label,count
+80,DDOS attack-HOIC,668461
+80,DDoS attacks-LOIC-HTTP,576191
+80,DoS attacks-Hulk,434873
+8080,Bot,277753
+22,SSH-Bruteforce,117315
+53,Infilteration,50302
+80,DoS attacks-GoldenEye,41455
+21,FTP-BruteForce,39346
+443,Infilteration,29228
+21,DoS attacks-SlowHTTPTest,19462

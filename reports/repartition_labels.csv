@@ -1,0 +1,16 @@
+label,count,percent
+Benign,13374921,85.04
+DDOS attack-HOIC,668461,4.25
+DDoS attacks-LOIC-HTTP,576191,3.66
+DoS attacks-Hulk,434873,2.76
+Bot,282310,1.79
+Infilteration,160604,1.02
+SSH-Bruteforce,117322,0.75
+DoS attacks-GoldenEye,41455,0.26
+FTP-BruteForce,39346,0.25
+DoS attacks-SlowHTTPTest,19462,0.12
+DoS attacks-Slowloris,10285,0.07
+DDOS attack-LOIC-UDP,1730,0.01
+Brute Force -Web,611,0.0
+Brute Force -XSS,230,0.0
+SQL Injection,87,0.0
