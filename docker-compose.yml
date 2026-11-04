@@ -64,7 +64,7 @@ services:
     command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
     environment:
       SPARK_WORKER_CORES: 2
-      SPARK_WORKER_MEMORY: 2g
+      SPARK_WORKER_MEMORY: 3g      # executor 2,5 Go : Cassandra arrêtée pendant le batch
     ports:
       - "8081:8081"
     volumes:

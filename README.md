@@ -116,12 +116,12 @@ docker compose ps
 Ouvrir **http://localhost:8080** : l'interface du master Spark doit afficher **1 worker** (ALIVE).
 📸 *Capture d'écran pour l'enseignante.*
 
-## Étape 4 — Exécuter le traitement batch (5–10 min de calcul)
+## Étape 4 — Exécuter le traitement batch (5 min pour 1 jour, 30 à 60 min pour les 10 jours)
 
 ```bash
 docker compose exec spark-master spark-submit \
   --master spark://spark-master:7077 \
-  --driver-memory 1g --executor-memory 1500m \
+  --driver-memory 1g --executor-memory 2500m \
   spark/batch/clean_and_stats.py \
   --input data/raw --output data/processed/flows --reports reports
 ```
@@ -130,11 +130,19 @@ docker compose exec spark-master spark-submit \
 Pendant le calcul, ouvrir **http://localhost:4040** pour voir les jobs et les étapes Spark.
 📸 *Capture d'écran.*
 
-Le script :
-1. charge tous les CSV de `data/raw/` (gère les fichiers à 80 et à 84 colonnes) ;
-2. supprime les en-têtes répétés, les valeurs vides/NaN/infinies, les doublons et les colonnes constantes ;
-3. écrit les données propres en **Parquet partitionné par jour** dans `data/processed/flows/` ;
-4. produit dans `reports/` :
+Arrêter Cassandra et Redis avant (`docker compose stop cassandra redis`) : l'executor utilise 2,5 Go.
+
+**Peu d'espace disque ?** Ajouter `--delete-raw` : chaque CSV est supprimé dès sa conversion en
+Parquet (environ 3 fois plus petit), l'espace libre augmente au fil du traitement. Les CSV restent
+re-téléchargeables avec `scripts\download_all.ps1`. Si le traitement est interrompu, relancer la même
+commande : les fichiers déjà convertis ne sont pas refaits.
+
+Le script travaille en 4 phases, pour ne jamais trier les 16 millions de flux d'un coup :
+1. **A. Conversion** : chaque CSV de `data/raw/` est typé et écrit en Parquet de travail, fichier par fichier, sans tri ;
+2. **B. Bilan** : en-têtes répétés, valeurs vides/NaN/infinies et colonnes constantes sont comptés ;
+3. **C. Doublons** : supprimés jour par jour (deux flux identiques ont le même horodatage, donc le même jour),
+   puis écriture en **Parquet partitionné par jour** dans `data/processed/flows/` ;
+4. **D. Statistiques**, dans `reports/` :
    - `rapport_nettoyage.json` : nombre de lignes à chaque étape, colonnes supprimées, durée ;
    - `volume_par_jour.csv/.png`, `repartition_labels.csv/.png`, `top_ports.csv/.png`, `top_ports_attaques.csv`.
 
