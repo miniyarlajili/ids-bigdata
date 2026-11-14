@@ -16,6 +16,7 @@ import argparse
 import itertools
 import json
 import os
+import sys
 import time
 from datetime import datetime, timezone
 
@@ -31,7 +32,9 @@ SEND_COLS = ["timestamp", "dst_port", "protocol", "flow_duration",
 
 
 def list_dates(path: str) -> list[str]:
-    return sorted(d.split("=", 1)[1] for d in os.listdir(path) if d.startswith("date="))
+    """Jours disponibles, limités à la période de capture (ignore les dates invalides, ex. 1970)."""
+    dates = (d.split("=", 1)[1] for d in os.listdir(path) if d.startswith("date="))
+    return sorted(d for d in dates if d >= "2018-01-01")
 
 
 def iter_flows(path: str, dates: list[str], chunk: int = 5000):
@@ -61,6 +64,7 @@ def main():
     p.add_argument("--limit", type=int, help="nombre maximum de flux")
     p.add_argument("--dry-run", action="store_true", help="affiche au lieu d'envoyer")
     args = p.parse_args()
+    sys.stdout.reconfigure(encoding="utf-8")   # accents lisibles dans la console Windows
 
     dates = [args.date] if args.date else list_dates(args.input)
     print(f"[producer] {len(dates)} jour(s) à rejouer : {', '.join(dates)}")

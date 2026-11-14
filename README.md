@@ -146,6 +146,10 @@ Le script travaille en 4 phases, pour ne jamais trier les 16 millions de flux d'
    - `rapport_nettoyage.json` : nombre de lignes à chaque étape, colonnes supprimées, durée ;
    - `volume_par_jour.csv/.png`, `repartition_labels.csv/.png`, `top_ports.csv/.png`, `top_ports_attaques.csv`.
 
+Les flux dont l'horodatage sort de la période de capture (ex. 1970) sont rejetés.
+Pour recalculer seulement les statistiques à partir du Parquet propre (sans les CSV) :
+`spark-submit --master spark://spark-master:7077 spark/batch/clean_and_stats.py --stats-only`
+
 Comparer la taille CSV vs Parquet (argument « Big Data » pour le rapport) :
 ```bash
 du -sh data/raw data/processed/flows
@@ -199,6 +203,7 @@ docker compose exec redis redis-cli HGETALL ids:thresholds
 | Problème | Solution |
 |---|---|
 | `port is already allocated` | Un autre programme utilise le port (8080, 9092…). Le fermer ou changer le port de gauche dans `docker-compose.yml`. |
+| Port 9200 ou 5601 déjà pris (autre projet Elasticsearch/Kibana) | Arrêter l'autre projet, ou lancer avec d'autres ports : `$env:ES_PORT=9201; $env:KIBANA_PORT=5602; docker compose up -d` (PowerShell). |
 | Le job Spark s'arrête avec `OutOfMemory` | Augmenter la RAM de Docker Desktop, ou réduire `--executor-memory`. |
 | Aucun worker sur http://localhost:8080 | `docker compose logs spark-worker` puis `docker compose restart spark-worker`. |
 | `Aucun fichier CSV trouvé` | Vérifier que le CSV est bien dans `data/raw/` à la racine du projet. |

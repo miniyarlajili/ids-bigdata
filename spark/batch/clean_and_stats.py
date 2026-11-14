@@ -36,11 +36,17 @@ TEXT_COLS = {"timestamp", "label", "flow_id", "src_ip", "dst_ip"}
 INT_COLS = {"dst_port", "src_port", "protocol"}
 REQUIRED = ["timestamp", "label", "dst_port", "protocol"]
 FLAGS = ["_hdr", "_bad"]
+# Période de capture du jeu de données : un horodatage en dehors (ex. 1970) est invalide
+CAPTURE_START, CAPTURE_END = "2018-02-01", "2018-03-31"
+
+
+def in_capture_period():
+    return F.col("date").between(F.lit(CAPTURE_START).cast("date"), F.lit(CAPTURE_END).cast("date"))
 
 
 def valid():
-    """Ligne gardée : ni en-tête répétée, ni valeur invalide."""
-    return (~F.col("_hdr")) & (~F.col("_bad"))
+    """Ligne gardée : ni en-tête répétée, ni valeur invalide, ni date hors période de capture."""
+    return (~F.col("_hdr")) & (~F.col("_bad")) & in_capture_period()
 
 
 def to_snake(name: str) -> str:
@@ -191,6 +197,20 @@ def dir_mb(path):
                      for dp, _, fs in os.walk(path) for f in fs) / 1e6, 1)
 
 
+def refresh_stats(spark, args):
+    """Recalcule les statistiques depuis le Parquet propre et met à jour le rapport existant."""
+    clean_df = spark.read.parquet(args.output)
+    path = os.path.join(args.reports, "rapport_nettoyage.json")
+    report = json.load(open(path, encoding="utf-8")) if os.path.exists(path) else {}
+    report["rows_final"] = clean_df.count()
+    report["columns_final"] = len(clean_df.columns)
+    report["size_parquet_mb"] = dir_mb(args.output)
+    save_stats(clean_df, args.reports)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(report, f, indent=2, ensure_ascii=False)
+    print(json.dumps(report, indent=2, ensure_ascii=False))
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", default="data/raw")
@@ -200,6 +220,8 @@ def main():
     parser.add_argument("--keep-staging", action="store_true", help="ne pas effacer le Parquet de travail")
     parser.add_argument("--delete-raw", action="store_true",
                         help="supprimer chaque CSV dès sa conversion (manque d'espace disque)")
+    parser.add_argument("--stats-only", action="store_true",
+                        help="recalculer seulement les statistiques à partir du Parquet propre (--output)")
     args = parser.parse_args()
     # chemins absolus : les executors (autre conteneur) n'ont pas le même dossier courant
     for k in ("input", "output", "staging", "reports"):
@@ -212,7 +234,7 @@ def main():
     sizes.update({os.path.basename(f): os.path.getsize(f) for f in files})
     os.makedirs(args.staging, exist_ok=True)
     json.dump(sizes, open(sizes_path, "w"), indent=2)
-    if not files and not glob.glob(os.path.join(args.staging, "source_file=*")):
+    if not args.stats_only and not files and not glob.glob(os.path.join(args.staging, "source_file=*")):
         raise SystemExit(f"Aucun fichier CSV trouvé dans {args.input}")
     print(f"[load] {len(files)} fichier(s) CSV à traiter, {sum(map(os.path.getsize, files)) / 1e6:,.0f} Mo :")
     for f in files:
@@ -231,6 +253,10 @@ def main():
              .config("spark.executor.heartbeatInterval", "60s")
              .getOrCreate())
     spark.sparkContext.setLogLevel("WARN")
+    if args.stats_only:
+        refresh_stats(spark, args)
+        spark.stop()
+        return
     t0 = time.time()
     report, durations = {}, {}
 
