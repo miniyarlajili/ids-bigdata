@@ -10,6 +10,7 @@ Exemples (depuis ta machine, Kafka lancé avec docker compose) :
   python producer/producer.py --rate 1000
   python producer/producer.py --rate 2000 --date 2018-02-14 --limit 100000
   python producer/producer.py --dry-run --limit 3      # test sans Kafka
+  python producer/producer.py --date 2018-02-14 --start-time 01:55   # juste avant l'attaque SSH
 """
 
 import argparse
@@ -20,6 +21,7 @@ import sys
 import time
 from datetime import datetime, timezone
 
+import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
@@ -37,7 +39,7 @@ def list_dates(path: str) -> list[str]:
     return sorted(d for d in dates if d >= "2018-01-01")
 
 
-def iter_flows(path: str, dates: list[str], chunk: int = 5000):
+def iter_flows(path: str, dates: list[str], chunk: int = 5000, start_time: str | None = None):
     """Génère les flux un par un, jour après jour, triés par heure."""
     for d in dates:
         part = os.path.join(path, f"date={d}")
@@ -45,6 +47,12 @@ def iter_flows(path: str, dates: list[str], chunk: int = 5000):
             os.path.join(part, f) for f in os.listdir(part) if f.endswith(".parquet"))).names)
         cols = [c for c in SEND_COLS if c in available]
         table = pq.read_table(part, columns=cols).sort_by("timestamp")
+        if start_time:                                      # sauter le début de la journée
+            ts_type = table.schema.field("timestamp").type
+            start = datetime.strptime(f"{d} {start_time}", "%Y-%m-%d %H:%M")
+            if ts_type.tz:
+                start = start.replace(tzinfo=timezone.utc)
+            table = table.filter(pc.greater_equal(table["timestamp"], pa.scalar(start, type=ts_type)))
         ts = pc.utf8_slice_codeunits(                       # "2018-02-14 10:15:32"
             pc.strftime(table["timestamp"], format="%Y-%m-%d %H:%M:%S"), 0, 19)
         table = table.set_column(table.schema.get_field_index("timestamp"), "timestamp", ts)
@@ -62,13 +70,14 @@ def main():
     p.add_argument("--rate", type=int, default=1000, help="flux par seconde")
     p.add_argument("--date", help="ne rejouer qu'un jour, ex. 2018-02-14")
     p.add_argument("--limit", type=int, help="nombre maximum de flux")
+    p.add_argument("--start-time", help="heure de départ dans la journée (HH:MM), ex. 01:55")
     p.add_argument("--dry-run", action="store_true", help="affiche au lieu d'envoyer")
     args = p.parse_args()
     sys.stdout.reconfigure(encoding="utf-8")   # accents lisibles dans la console Windows
 
     dates = [args.date] if args.date else list_dates(args.input)
     print(f"[producer] {len(dates)} jour(s) à rejouer : {', '.join(dates)}")
-    flows = iter_flows(args.input, dates)
+    flows = iter_flows(args.input, dates, start_time=args.start_time)
     if args.limit:
         flows = itertools.islice(flows, args.limit)
 
@@ -81,8 +90,6 @@ def main():
     from kafka import KafkaProducer
     producer = KafkaProducer(
         bootstrap_servers=args.bootstrap,
-        value_serializer=lambda v: json.dumps(v).encode("utf-8"),
-        key_serializer=lambda k: str(k).encode("utf-8"),
         acks="all",            # fiabilité : message confirmé par le broker
         linger_ms=20,
         batch_size=64 * 1024,
@@ -93,18 +100,23 @@ def main():
     sent, start, last_log = 0, time.time(), time.time()
     try:
         while True:
-            t_batch = time.time()
             batch = list(itertools.islice(flows, per_tick))
             if not batch:
                 break
             now = datetime.now(timezone.utc).isoformat()
             for r in batch:
                 r["event_time"] = now           # heure de rejeu (utilisée par le streaming)
-                producer.send(args.topic, key=r["dst_port"], value=r)
+                producer.send(args.topic, key=str(r["dst_port"]).encode(),
+                              value=json.dumps(r).encode("utf-8"))
             sent += len(batch)
-            elapsed = time.time() - t_batch
-            if elapsed < tick:
-                time.sleep(tick - elapsed)
+            # rythme calé sur l'heure de départ : un petit retard est rattrapé au paquet suivant ;
+            # un gros retard (chargement d'une journée, pause) n'est pas rattrapé, pour ne pas
+            # envoyer une rafale artificielle qui ressemblerait à une attaque
+            ahead = start + sent / args.rate - time.time()
+            if ahead > 0:
+                time.sleep(ahead)
+            elif ahead < -1:
+                start = time.time() - sent / args.rate
             if time.time() - last_log >= 5:     # log toutes les 5 s
                 last_log = time.time()
                 print(f"[producer] {sent:,} flux envoyés — débit réel {sent / (last_log - start):,.0f} flux/s")

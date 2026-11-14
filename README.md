@@ -20,7 +20,7 @@ ids-bigdata/
 ├── spark/
 │   ├── Dockerfile              # image Spark 3.5.3 + pandas/matplotlib
 │   ├── batch/clean_and_stats.py   # phase 1 : nettoyage + Parquet + statistiques
-│   └── streaming/              # phase 2 : détection temps réel (à venir)
+│   └── streaming/detect.py     # phase 2 : détection temps réel (Kafka → règles → Elasticsearch)
 ├── producer/producer.py        # rejeu du trafic dans Kafka (débit réglable)
 ├── scripts/download_sample.sh  # téléchargement d'un jour du dataset
 ├── data/raw/                   # CSV bruts (non versionnés)
@@ -36,7 +36,8 @@ ids-bigdata/
 | 1. Conception | Architecture, justification des choix, modélisation des données, points critiques | ✅ dossier de conception |
 | 2. Déploiement | Nettoyage batch + Parquet + statistiques | ✅ code prêt |
 | 2. Déploiement | Producteur Kafka (rejeu chronologique, débit réglable) | ✅ code prêt |
-| 2. Déploiement | Spark Structured Streaming + règles DDoS / scan / brute force | ⏳ |
+| 2. Déploiement | Spark Structured Streaming + règles DDoS / scan / brute force + Elasticsearch | ✅ testé (latence ~2 s, reprise sans perte) |
+| 2. Déploiement | Tableau de bord Kibana | ⏳ |
 | 3. Intégration NoSQL | Cassandra + Redis (services et schéma prêts), écriture depuis Spark | ⏳ |
 | 4. Tests | Performance (débit, latence) et tolérance aux pannes (RTO) | ⏳ |
 
@@ -195,6 +196,45 @@ docker compose exec redis redis-cli HSET ids:thresholds brute_force 50
 docker compose exec redis redis-cli HGETALL ids:thresholds
 ```
 📸 *Captures d'écran : les tables Cassandra et la réponse de Redis.*
+
+## Étape 8 — Détection en temps réel (Spark Structured Streaming)
+
+Démarrer la chaîne (Cassandra et Redis peuvent rester arrêtés, ils ne servent pas ici) :
+```bash
+docker compose up -d kafka kafka-init spark-master spark-worker elasticsearch kibana
+```
+`kafka-init` crée les topics `network-flows` (3 partitions) et `ids-alerts`, puis s'arrête.
+
+Lancer la détection (terminal 1, elle tourne en continu, Ctrl+C pour l'arrêter) :
+```bash
+docker compose exec spark-master spark-submit --master spark://spark-master:7077 --executor-memory 1g --total-executor-cores 2 spark/streaming/detect.py
+```
+- `--sink console` : affiche les alertes au lieu de les envoyer à Elasticsearch (test rapide) ;
+- `--reset` : efface les checkpoints (repartir de zéro) ; sans cette option, Spark reprend
+  exactement là où il s'était arrêté (aucun flux perdu ni compté deux fois).
+
+Rejouer du trafic (terminal 2). `--start-time` démarre juste avant une attaque :
+
+| Attaque | Commande |
+|---|---|
+| SSH-Bruteforce | `python producer/producer.py --date 2018-02-14 --start-time 02:00 --limit 60000` |
+| FTP-BruteForce | `python producer/producer.py --date 2018-02-14 --start-time 10:32 --limit 40000` |
+| DoS Hulk | `python producer/producer.py --date 2018-02-16 --start-time 01:44 --limit 40000` |
+| DDoS HOIC | `python producer/producer.py --date 2018-02-21 --start-time 02:10 --limit 60000` |
+| DDoS LOIC-HTTP | `python producer/producer.py --date 2018-02-20 --start-time 01:13 --limit 60000` |
+
+Les résultats arrivent dans 3 index Elasticsearch :
+- `ids-traffic` : trafic global seconde par seconde (flux, paquets, latence) ;
+- `ids-ports` : indicateurs par fenêtre de 10 s et par port (ports les plus actifs, ports attaqués) ;
+- `ids-alerts` : alertes (type, gravité, fenêtre, valeur mesurée, seuil, latence).
+
+Vérifier : `curl "localhost:9200/_cat/indices/ids-*?v"`
+
+Les seuils sont dans `config/detection_rules.yaml` (calibrés pour 1 000 flux/s). Pour rejouer plus vite,
+changer `replay_rate` : les seuils sont mis à l'échelle automatiquement.
+
+**Mémoire** : Docker Desktop dispose d'environ 6 Go. Arrêter les autres projets Elasticsearch/Kibana
+avant de lancer celui-ci.
 
 ---
 

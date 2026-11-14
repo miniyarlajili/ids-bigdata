@@ -1,19 +1,19 @@
 # État d'avancement du projet — comparaison avec le cahier des charges
 
-*Analyse du 14/11/2026 (semaine 4 sur 7 depuis le 23/10/2026).*
+*Analyse du 14/11/2026 (semaine 4 sur 7 depuis le 23/10/2026), mise à jour le même jour après l'écriture de la détection temps réel.*
 
 ## 1. Résumé
 
 | Objectif du cahier des charges | État | Avancement |
 |---|---|---|
 | 1. Batch Spark sur l'historique complet (~16 M flux) | ✅ Fait et exécuté | 100 % |
-| 2. Simulation du trafic dans Kafka (≥ 1 000 flux/s) | 🟡 Code testé (dry-run OK), débit réel avec Kafka à mesurer | 80 % |
-| 3. Détection temps réel avec Spark Structured Streaming | ❌ Pas commencé (`spark/streaming/` vide) | 0 % |
-| 4. Tableau de bord Kibana | ❌ Services déclarés dans docker-compose, rien d'autre | 5 % |
-| 5. Évaluation (détection, fausses alertes, débit, latence) | ❌ Pas commencé | 0 % |
+| 2. Simulation du trafic dans Kafka (≥ 1 000 flux/s) | ✅ Testé : 1 000 flux/s tenus, départ à une heure choisie (`--start-time`) | 100 % |
+| 3. Détection temps réel avec Spark Structured Streaming | ✅ `spark/streaming/detect.py` écrit et testé, envoi vers Elasticsearch | 90 % |
+| 4. Tableau de bord Kibana | ❌ Données prêtes dans Elasticsearch, tableau de bord à construire | 15 % |
+| 5. Évaluation (détection, fausses alertes, débit, latence) | 🟡 Premières mesures (latence ~2 s, reprise sans perte), script d'évaluation à écrire | 20 % |
 
-**Avancement global estimé : environ 35 %.** Le socle (infrastructure, données, batch) est solide.
-Le cœur du système, Spark Streaming, reste à écrire, et tout ce qui suit en dépend.
+**Avancement global estimé : environ 65 %.** Le cœur du système fonctionne de bout en bout :
+Kafka → Spark Streaming → règles → Elasticsearch. Restent le tableau de bord Kibana, l'évaluation chiffrée et le rapport.
 
 ---
 
@@ -61,21 +61,47 @@ Le cœur du système, Spark Streaming, reste à écrire, et tout ce qui suit en 
 ### 2.6 Bonus hors cahier des charges
 Cassandra (schéma de 4 tables orienté requêtes, `config/cassandra/schema.cql`) et Redis sont prêts. Ils ne sont pas demandés par ce cahier des charges, mais le README les justifie par l'exigence « au moins 2 bases NoSQL ». Aucune donnée n'y est encore écrite.
 
+### 2.7 Détection en temps réel (objectif 3) : fait et testé
+`spark/streaming/detect.py` (lancement : voir l'étape 8 du README) :
+- lit le topic Kafka `network-flows` en continu ;
+- fenêtres glissantes de 10 s (pas de 5 s), trois calculs en parallèle :
+  1. par **port de destination** : flux, paquets/s, octets, connexions courtes → règles **DDoS/DoS** et **force brute** ;
+  2. par **adresse source** : nombre de ports distincts → règle **scan de ports** ;
+  3. **trafic global seconde par seconde** → courbe du tableau de bord, mesure du débit et de la latence ;
+- alerte avec type, gravité, fenêtre, valeur mesurée, seuil et latence ;
+- envoi vers 3 index Elasticsearch : `ids-traffic`, `ids-ports`, `ids-alerts` ;
+- les étiquettes du jeu de données ne servent **jamais** à détecter : elles sont seulement recopiées (`attack_flows`, `attack_labels`) pour l'évaluation ;
+- les seuils sont calibrés sur les données réelles (voir l'en-tête de `config/detection_rules.yaml`) et mis à l'échelle si on change le débit de rejeu.
+
+Autres changements :
+- service `kafka-init` dans le docker-compose : il crée les topics au démarrage ;
+- connecteur Kafka et client Elasticsearch intégrés à l'image Spark ;
+- producteur : rythme exact (1 000 flux/s), sans rafale artificielle après le chargement d'une journée.
+
+**Résultats des tests (14/11/2026, 1 000 flux/s) :**
+
+| Attaque rejouée | Détectée ? | Règle déclenchée | Fausses alertes |
+|---|---|---|---|
+| SSH-Bruteforce (14/02) | ✅ | force brute, port 22 | 0 |
+| FTP-BruteForce (14/02) | ✅ | force brute, port 21 | 0 |
+| DoS Hulk (16/02) | ✅ | DDoS/DoS (connexions), port 80 | 0 |
+| DDoS HOIC (21/02) | ✅ | DDoS/DoS (connexions), port 80 | 0 |
+
+- **Latence** (arrivée du flux → alerte enregistrée) : 1 à 3 s en moyenne, au maximum 6 s au démarrage d'une attaque.
+- **Fiabilité** : Spark arrêté, 20 000 flux envoyés pendant la panne, puis redémarrage. Résultat : **120 000 flux comptés sur 120 000 envoyés**, sans perte ni doublon (checkpoints et identifiants déterministes).
+
 ---
 
 ## 3. Ce qui reste à faire
 
 | Besoin du cahier des charges | Reste à faire |
 |---|---|
-| Lire Kafka avec Spark Structured Streaming | Tout |
-| Indicateurs par fenêtre glissante (flux, paquets/s, ports distincts, connexions courtes) | Tout |
-| Règles DDoS/DoS, scan de ports, force brute | Tout |
-| Alerte avec type, heure et gravité | Tout |
-| Envoi des flux et des alertes vers Elasticsearch | Tout |
+| Lire Kafka, fenêtres, règles, alertes, envoi vers Elasticsearch, checkpoints | ✅ Fait |
+| Scan de ports | Règle écrite, mais aucune attaque de ce type dans le jeu de données : à tester avec un trafic synthétique |
 | Tableau de bord Kibana : trafic/s, alertes par type, top ports et destinations, dernières alertes | Tout, plus l'export `.ndjson` dans `kibana/` |
-| Points de contrôle (checkpoints) et reprise après redémarrage | Tout |
-| Évaluation : taux de détection et fausses alertes par type d'attaque | Tout |
-| Mesure du débit (≥ 1 000 flux/s) et de la latence | Tout |
+| Évaluation : taux de détection et fausses alertes par type d'attaque, sur des journées entières | Script à écrire (les données nécessaires sont déjà dans `ids-ports`) |
+| Mesure du débit maximal (2 000, 5 000 flux/s) | À faire |
+| Écriture vers Cassandra et Redis (bonus) | À faire si le temps le permet |
 | Rapport et démonstration | Tout |
 
 ---

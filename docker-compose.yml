@@ -29,6 +29,22 @@ services:
       KAFKA_LOG_RETENTION_HOURS: 24       # Spark peut relire 24 h de messages après une panne
       KAFKA_HEAP_OPTS: -Xmx512m -Xms512m
 
+  # Crée les topics au démarrage (sinon Spark échoue s'il démarre avant le producteur)
+  kafka-init:
+    image: apache/kafka:3.8.0
+    container_name: kafka-init
+    depends_on:
+      - kafka
+    restart: "no"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        K=/opt/kafka/bin/kafka-topics.sh
+        until $$K --bootstrap-server kafka:29092 --list >/dev/null 2>&1; do echo "attente de Kafka..."; sleep 2; done
+        $$K --bootstrap-server kafka:29092 --create --if-not-exists --topic network-flows --partitions 3 --replication-factor 1
+        $$K --bootstrap-server kafka:29092 --create --if-not-exists --topic ids-alerts --partitions 1 --replication-factor 1
+        $$K --bootstrap-server kafka:29092 --describe --topic network-flows
+
   # Interface web pour voir les topics et les messages : http://localhost:8090
   kafka-ui:
     image: provectuslabs/kafka-ui:v0.7.2
